@@ -1,0 +1,37 @@
+{
+  "n_questions": 3,
+  "retrieval_precision_at_k_mean": 0.0,
+  "retrieval_recall_at_k_mean": 0.0,
+  "answer_citation_count_mean": 0.0,
+  "answer_citation_hit_rate_mean": null,
+  "refusal_correctness_mean": 0.6666666666666666,
+  "per_question": [
+    {
+      "id": "q1",
+      "question": "What is the main contribution of this paper?",
+      "precision_at_k": 0.0,
+      "recall_at_k": 0.0,
+      "citation_count": 0,
+      "citation_hit_rate": null,
+      "refusal_correct": true
+    },
+    {
+      "id": "q2",
+      "question": "What are the limitations mentioned?",
+      "precision_at_k": 0.0,
+      "recall_at_k": 0.0,
+      "citation_count": 0,
+      "citation_hit_rate": null,
+      "refusal_correct": true
+    },
+    {
+      "id": "q3",
+      "question": "What clinical trial size was used?",
+      "precision_at_k": 0.0,
+      "recall_at_k": 0.0,
+      "citation_count": 0,
+      "citation_hit_rate": null,
+      "refusal_correct": false
+    }
+  ]
+}

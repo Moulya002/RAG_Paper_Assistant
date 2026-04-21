@@ -1,0 +1,3 @@
+{"id":"q1","question":"What is the main contribution of this paper?","doc_id":"REPLACE_WITH_DOC_ID_OR_NULL","relevant_pages":[2,3],"relevant_chunk_ids":[],"expected_refusal":false}
+{"id":"q2","question":"What are the limitations mentioned?","doc_id":"REPLACE_WITH_DOC_ID_OR_NULL","relevant_pages":[3],"relevant_chunk_ids":[],"expected_refusal":false}
+{"id":"q3","question":"What clinical trial size was used?","doc_id":"REPLACE_WITH_DOC_ID_OR_NULL","relevant_pages":[],"relevant_chunk_ids":[],"expected_refusal":true}

@@ -1,0 +1,10 @@
+streamlit
+langchain
+openai
+faiss-cpu
+tiktoken
+python-dotenv
+numpy
+pymupdf
+chromadb
+sentence-transformers

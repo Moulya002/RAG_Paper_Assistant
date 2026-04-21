@@ -147,7 +147,6 @@ venv.bak/
 # Spyder project settings
 .spyderproject
 .spyproject
-
 # Rope project settings
 .ropeproject
 
@@ -205,3 +204,4 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+data/
