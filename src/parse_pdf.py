@@ -152,12 +152,14 @@ def extract_blocks(pdf_path: str) -> tuple[str, list[TextBlock]]:
 
     blocks: list[TextBlock] = []
     total_pages = len(doc)
-    current_section = "Unknown"
     repeated_margin_lines = _collect_repeated_margin_lines(doc)
 
     for page_index in range(total_pages):
         page = doc[page_index]
         page_no = page_index + 1
+        # Reset section context per page so one early heading does not
+        # incorrectly label later pages (e.g., everything as Introduction).
+        current_section = _infer_section_by_position(page_no, total_pages)
         text = page.get_text("text") or ""
         if repeated_margin_lines:
             kept_lines = []
@@ -173,8 +175,6 @@ def extract_blocks(pdf_path: str) -> tuple[str, list[TextBlock]]:
             normalized = _normalize_noise(para)
             if current_section in EXCLUDED_EMBED_SECTIONS:
                 continue
-            if current_section == "Unknown":
-                current_section = _infer_section_by_position(page_no, total_pages)
             # Noise filtering must run before citation marker stripping so
             # bibliography patterns like "[25] Author..." are still detectable.
             if _is_noise_paragraph(normalized):
@@ -233,21 +233,11 @@ def build_chunks(
     overlap_chars: int = CHUNK_OVERLAP_CHARS,
 ) -> list[ChunkRecord]:
     records: list[ChunkRecord] = []
-    section_buffers: dict[str, list[TextBlock]] = {}
-    order: list[str] = []
+    # Keep page + section mapping exact by chunking each cleaned block with
+    # its own metadata, instead of concatenating a full section.
     for block in blocks:
         section = block.section_hint or "Body"
-        if section not in section_buffers:
-            section_buffers[section] = []
-            order.append(section)
-        section_buffers[section].append(block)
-
-    for section in order:
-        sec_blocks = section_buffers[section]
-        # Concatenate section text so headings like Results/Conclusion are preserved as semantic units.
-        full_text = "\n\n".join(b.text for b in sec_blocks).strip()
-        first_page = sec_blocks[0].page if sec_blocks else 0
-        for window in char_windows(full_text, target_chars, overlap_chars):
+        for window in char_windows(block.text, target_chars, overlap_chars):
             if len(window.strip()) < 80:
                 continue
             records.append(
@@ -256,7 +246,7 @@ def build_chunks(
                     doc_id=doc_id,
                     title=title,
                     section=section,
-                    page=first_page,
+                    page=block.page,
                     text=window.strip(),
                 )
             )

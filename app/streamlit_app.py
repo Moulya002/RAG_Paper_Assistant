@@ -8,9 +8,9 @@ from __future__ import annotations
 
 import csv
 import io
-import json
 import re
 import shutil
+import string
 import uuid
 from pathlib import Path
 import streamlit as st
@@ -51,6 +51,60 @@ SUGGESTED_QUESTIONS: list[str] = [
     "What are the limitations?",
     "What is the main contribution?",
 ]
+
+
+def _normalize_text(s: str) -> str:
+    t = (s or "").lower().strip()
+    t = t.translate(str.maketrans("", "", string.punctuation))
+    t = re.sub(r"\s+", " ", t)
+    return t
+
+
+def _token_f1(pred: str, gold: str) -> float:
+    p_tokens = _normalize_text(pred).split()
+    g_tokens = _normalize_text(gold).split()
+    if not p_tokens and not g_tokens:
+        return 1.0
+    if not p_tokens or not g_tokens:
+        return 0.0
+    common = {}
+    for tok in p_tokens:
+        common[tok] = common.get(tok, 0) + 1
+    overlap = 0
+    for tok in g_tokens:
+        c = common.get(tok, 0)
+        if c > 0:
+            overlap += 1
+            common[tok] = c - 1
+    if overlap == 0:
+        return 0.0
+    precision = overlap / len(p_tokens)
+    recall = overlap / len(g_tokens)
+    return 2 * precision * recall / (precision + recall)
+
+
+def _compute_live_doc_scores(
+    answer: str,
+    citations: list,
+    retrieval_confidence: float | None,
+) -> dict:
+    """
+    Always-available live score per answer/document.
+    This is a groundedness/support score (not benchmark exact-match).
+    """
+    n_citations = len(citations or [])
+    citation_coverage = min(1.0, n_citations / 4.0)  # saturates at 4 citations
+    has_refusal = "not provide enough information in the retrieved context" in answer.lower()
+    refusal_penalty = 0.85 if has_refusal else 1.0
+    retr = retrieval_confidence if retrieval_confidence is not None else 0.0
+    # Weighted live score: retrieval quality + citation support.
+    live_accuracy_estimate = (0.7 * retr + 0.3 * citation_coverage) * 100.0 * refusal_penalty
+    return {
+        "live_accuracy_estimate": max(0.0, min(100.0, live_accuracy_estimate)),
+        "retrieval_confidence": retr * 100.0,
+        "citation_coverage": citation_coverage * 100.0,
+        "citation_count": n_citations,
+    }
 
 
 def _format_answer_for_display(answer: str) -> str:
@@ -220,6 +274,18 @@ def _render_retrieval_debug(chunks: list[dict] | None) -> None:
         st.code(str(c.get("preview", "")))
 
 
+def _render_live_doc_scores(scores: dict | None) -> None:
+    if not scores:
+        st.info("No live scores available for this answer.")
+        return
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Live accuracy estimate", f"{float(scores.get('live_accuracy_estimate', 0.0)):.1f}%")
+    c2.metric("Retrieval confidence", f"{float(scores.get('retrieval_confidence', 0.0)):.1f}%")
+    c3.metric("Citation coverage", f"{float(scores.get('citation_coverage', 0.0)):.1f}%")
+    c4.metric("Citation count", f"{int(scores.get('citation_count', 0))}")
+    st.caption("Live score is computed per answer from retrieval quality + citation support for this document.")
+
+
 def ensure_data_dirs() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
@@ -234,51 +300,6 @@ def main() -> None:
         "Retrieval-Augmented Generation: embed PDF chunks, retrieve relevant passages (with MMR), "
         "then generate one answer conditioned on those passages—no agent loop, tools, or autonomous planning."
     )
-
-    eval_report_path = ROOT / "evaluation" / "eval_report.json"
-    with st.expander("Evaluation (ground-truth metrics)", expanded=False):
-        if not eval_report_path.exists():
-            st.info(
-                "No `evaluation/eval_report.json` found yet. "
-                "Run: `python evaluation/run_eval.py --gold evaluation/gold_qa_template.jsonl --k 5 --out evaluation/eval_report.json`"
-            )
-        else:
-            try:
-                report = json.loads(eval_report_path.read_text(encoding="utf-8"))
-            except Exception as e:
-                st.error(f"Could not read evaluation report: {e}")
-            else:
-                c1, c2, c3 = st.columns(3)
-                c1.metric("Questions", int(report.get("n_questions", 0)))
-                c2.metric(
-                    "Precision@k (mean)",
-                    f"{float(report.get('retrieval_precision_at_k_mean', 0.0)):.3f}",
-                )
-                c3.metric(
-                    "Recall@k (mean)",
-                    f"{float(report.get('retrieval_recall_at_k_mean', 0.0)):.3f}",
-                )
-
-                c4, c5, c6 = st.columns(3)
-                c4.metric(
-                    "Citation hit rate (mean)",
-                    f"{float(report.get('answer_citation_hit_rate_mean', 0.0) or 0.0):.3f}",
-                )
-                c5.metric(
-                    "Refusal correctness",
-                    (
-                        f"{float(report.get('refusal_correctness_mean', 0.0) or 0.0):.3f}"
-                        if report.get("refusal_correctness_mean") is not None
-                        else "—"
-                    ),
-                )
-                c6.metric(
-                    "Citation count (mean)",
-                    f"{float(report.get('answer_citation_count_mean', 0.0)):.2f}",
-                )
-                st.caption(
-                    "These are true benchmark metrics computed against a gold QA set, unlike live proxy confidence."
-                )
 
     with st.sidebar:
         st.subheader("Index a paper")
@@ -359,6 +380,8 @@ def main() -> None:
                         msg.get("correctness_score"),
                         msg.get("retrieval_confidence"),
                     )
+                with st.expander("Live scores (per-document)", expanded=False):
+                    _render_live_doc_scores(msg.get("live_doc_scores"))
                 with st.expander("Retrieval debug (chunks + scores)", expanded=False):
                     _render_retrieval_debug(msg.get("retrieved_chunks_debug"))
             if msg["role"] == "assistant" and msg.get("logprob_summary"):
@@ -406,6 +429,13 @@ def main() -> None:
                 result.correctness_score,
                 result.retrieval_confidence,
             )
+        live_doc_scores = _compute_live_doc_scores(
+            result.answer,
+            result.citations,
+            result.retrieval_confidence,
+        )
+        with st.expander("Live scores (per-document)", expanded=False):
+            _render_live_doc_scores(live_doc_scores)
         with st.expander("Retrieval debug (chunks + scores)", expanded=False):
             _render_retrieval_debug(result.retrieved_chunks_debug)
         if result.citations:
@@ -423,6 +453,7 @@ def main() -> None:
             "correctness_score": result.correctness_score,
             "retrieval_confidence": result.retrieval_confidence,
             "retrieved_chunks_debug": result.retrieved_chunks_debug,
+            "live_doc_scores": live_doc_scores,
         }
         if logprob_dict is not None:
             payload["logprob_summary"] = logprob_dict
