@@ -1,33 +1,111 @@
-# RAG_Paper_Assistant
-Retrieval-Augmented QA system for research papers with grounded answers and source citations.
+🚀 RAG-Based Research Paper Assistant
 
-## Run UI
+An AI-powered system that helps users analyze, understand, and interact with research papers using Natural Language Processing (NLP) and Retrieval-Augmented Generation (RAG).
 
-```bash
-cd "/Users/moulya.r.b/Desktop/Final Project"
-source .venv/bin/activate
+📌 Overview
+
+Reading and understanding research papers is often time-consuming and complex. Extracting key insights, methodologies, and results manually can take hours.
+
+This project solves that problem by building an intelligent assistant that allows users to:
+
+Ask questions about research papers
+Get concise, context-aware answers
+Generate summaries and explanations instantly
+🎯 Problem Statement
+Research papers are dense and difficult to navigate
+Traditional keyword search fails to capture meaning
+Important sections like results and conclusions are hard to extract quickly
+💡 Solution
+
+We developed a RAG-based Research Assistant that:
+
+Uses semantic search to understand context
+Retrieves the most relevant sections of a paper
+Generates accurate answers using an LLM
+Provides explainability and confidence insights
+✨ Key Features
+🔍 Semantic Search (Phase 3) — retrieves context based on meaning, not keywords
+📄 PDF Processing — extracts and processes research papers
+🧠 RAG Pipeline — combines retrieval with generation for accurate answers
+🤖 Explainable AI (XAI) — shows confidence and reasoning
+📊 Token Probability Scoring — evaluates answer reliability
+🖥️ Streamlit UI — interactive interface for users
+⚡ Quick Actions — summarize, explain methodology, results, etc.
+⚙️ How It Works
+Upload a research paper (PDF)
+Extract text from the document
+Split text into manageable chunks
+Convert chunks into embeddings (numerical representations)
+Store embeddings in a vector database (Chroma)
+User asks a question
+System retrieves the most relevant chunks
+LLM generates a context-aware answer
+🧠 System Architecture
+PDF Input
+   ↓
+Text Extraction
+   ↓
+Chunking
+   ↓
+Embeddings
+   ↓
+Vector Database (Chroma)
+   ↓
+Semantic Retrieval
+   ↓
+LLM (Answer Generation)
+   ↓
+User Interface (Streamlit)
+🖥️ Demo
+
+Add your screenshot or GIF here
+
+images/demo.png
+📊 Results & Evaluation
+Improved answer relevance using semantic search
+Reduced hallucinations through retrieval-based generation
+Enhanced context matching with optimized chunking
+Reliable responses using confidence scoring
+🧪 Project Phases
+🔹 Phase 1 — Data Processing
+PDF extraction
+Text cleaning and preprocessing
+🔹 Phase 2 — RAG Pipeline
+Chunking
+Embeddings
+Vector database integration
+🔹 Phase 3 — Semantic Search & XAI
+Improved retrieval using semantic similarity
+Explainable AI features
+Confidence scoring
+🔹 Phase 4 — Deployment
+Streamlit application
+Interactive UI
+🛠️ Tech Stack
+Python — core development
+Streamlit — web interface
+ChromaDB — vector database
+NLP Techniques — text processing
+Embeddings — semantic understanding
+LLM — answer generation
+▶️ Installation & Setup
+pip install -r requirements.txt
+▶️ Run the Application
 streamlit run app/streamlit_app.py
-```
+🔮 Future Work
+Hybrid search (semantic + keyword/BM25)
+Multi-document question answering
+Improved evaluation metrics
+Scalable deployment
+Enhanced UI/UX
+📌 Applications
+Academic research assistance
+Literature review automation
+AI-powered document analysis
+Knowledge retrieval systems
+👨‍💻 Authors
+Your Name
+Team Members
+📎 Repository
 
-## Evaluation (Professor feedback alignment)
-
-This repo now includes a lightweight evaluation runner for:
-- Retrieval quality: `Precision@k`, `Recall@k`
-- End-to-end QA proxies: citation count, citation hit rate, refusal correctness
-
-### 1) Prepare a gold set
-
-Edit `evaluation/gold_qa_template.jsonl` and replace:
-- `doc_id`: set to your indexed document id (or `null` to search all)
-- `relevant_pages` and/or `relevant_chunk_ids`
-- `expected_refusal` for questions that should be declined
-
-### 2) Run evaluation
-
-```bash
-cd "/Users/moulya.r.b/Desktop/Final Project"
-source .venv/bin/activate
-python evaluation/run_eval.py --gold evaluation/gold_qa_template.jsonl --k 5 --out evaluation/eval_report.json
-```
-
-The command prints summary metrics and writes full per-question results to `evaluation/eval_report.json`.
+👉 https://github.com/Moulya002/RAG_Paper_Assistant
