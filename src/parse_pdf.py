@@ -13,9 +13,7 @@ from pathlib import Path
 from typing import Iterator
 
 import fitz  # PyMuPDF
-import tiktoken
-
-from src.config import CHUNK_OVERLAP_TOKENS, CHUNK_TARGET_TOKENS
+from src.config import CHUNK_OVERLAP_CHARS, CHUNK_TARGET_CHARS
 
 
 @dataclass
@@ -203,24 +201,15 @@ def _normalize_noise(text: str) -> str:
     return t.strip()
 
 
-def _encoding():
-    try:
-        return tiktoken.encoding_for_model("gpt-4o-mini")
-    except Exception:
-        return tiktoken.get_encoding("cl100k_base")
-
-
-def token_windows(text: str, target: int, overlap: int) -> Iterator[str]:
-    enc = _encoding()
-    ids = enc.encode(text)
-    if not ids:
+def char_windows(text: str, target: int, overlap: int) -> Iterator[str]:
+    clean = text.strip()
+    if not clean:
         return
+    n = len(clean)
     start = 0
-    n = len(ids)
     while start < n:
         end = min(start + target, n)
-        chunk_ids = ids[start:end]
-        yield enc.decode(chunk_ids)
+        yield clean[start:end].strip()
         if end >= n:
             break
         start = max(end - overlap, start + 1)
@@ -240,14 +229,26 @@ def build_chunks(
     doc_id: str,
     title: str,
     blocks: list[TextBlock],
-    target_tokens: int = CHUNK_TARGET_TOKENS,
-    overlap_tokens: int = CHUNK_OVERLAP_TOKENS,
+    target_chars: int = CHUNK_TARGET_CHARS,
+    overlap_chars: int = CHUNK_OVERLAP_CHARS,
 ) -> list[ChunkRecord]:
     records: list[ChunkRecord] = []
+    section_buffers: dict[str, list[TextBlock]] = {}
+    order: list[str] = []
     for block in blocks:
         section = block.section_hint or "Body"
-        for window in token_windows(block.text, target_tokens, overlap_tokens):
-            if len(window.strip()) < 30:
+        if section not in section_buffers:
+            section_buffers[section] = []
+            order.append(section)
+        section_buffers[section].append(block)
+
+    for section in order:
+        sec_blocks = section_buffers[section]
+        # Concatenate section text so headings like Results/Conclusion are preserved as semantic units.
+        full_text = "\n\n".join(b.text for b in sec_blocks).strip()
+        first_page = sec_blocks[0].page if sec_blocks else 0
+        for window in char_windows(full_text, target_chars, overlap_chars):
+            if len(window.strip()) < 80:
                 continue
             records.append(
                 ChunkRecord(
@@ -255,7 +256,7 @@ def build_chunks(
                     doc_id=doc_id,
                     title=title,
                     section=section,
-                    page=block.page,
+                    page=first_page,
                     text=window.strip(),
                 )
             )

@@ -5,6 +5,7 @@ This is not an agentic system (no tool use, ReAct loop, or planner).
 
 from __future__ import annotations
 
+import logging
 from dataclasses import asdict, dataclass
 
 from openai import BadRequestError, OpenAI
@@ -27,6 +28,7 @@ from src.token_logprobs import TokenLogprobSummary, summarize_choice_logprobs
 from src.retrieve import retrieve_with_mmr
 from src.vector_store import get_collection, query_raw
 
+logger = logging.getLogger(__name__)
 
 def _groq_client() -> OpenAI:
     """OpenAI-compatible client targeting Groq chat completions."""
@@ -45,11 +47,12 @@ You will receive numbered contexts. Each context is the ONLY evidence you may us
 STRICT RULES:
 1. Answer ONLY using information supported by those numbered contexts. Do not use outside knowledge, guesses, or unstated assumptions.
 2. Every substantive sentence or clause must carry inline citations using the context numbers exactly as given, e.g. [1], [2], [1][3]. Place citations immediately after the supported text.
-3. If the contexts do not support an answer, say exactly: "The document does not provide enough information in the retrieved context."
+3. If the contexts are sparse, provide the best possible answer from available evidence and clearly state what is missing.
 4. You may paraphrase, but any factual claim must still be tied to the cited chunk(s). Prefer short quotes from the chunk text when precision matters, and cite them.
 5. Do not invent section names, page numbers, authors, or citations beyond [1]..[n] for the contexts supplied.
 6. Avoid vague wording such as "appears to be", "seems", "likely", or speculative language.
-7. Prefer short, direct, evidence-based statements over generic textbook phrasing."""
+7. Prefer short, direct, evidence-based statements over generic textbook phrasing.
+8. Only refuse when there is genuinely no relevant context at all."""
 
 
 @dataclass
@@ -73,6 +76,9 @@ class RagResult:
     answer: str
     citations: list[Citation]
     logprob_summary: TokenLogprobSummary | None = None
+    retrieval_confidence: float | None = None
+    correctness_score: float | None = None
+    retrieved_chunks_debug: list[dict] | None = None
 
 
 def _flatten_chroma(res: dict) -> tuple[list[str], list[str], list[dict]]:
@@ -87,6 +93,8 @@ def gather_contexts(
     doc_id: str | None,
     retrieval_k: int = RETRIEVAL_TOP_K,
     mmr_select: int = MMR_SELECT,
+    min_relevance_sim: float = MIN_RELEVANCE_SIM,
+    prefer_sections: set[str] | None = None,
 ) -> list[tuple[str, dict, str, float]]:
     """Retrieve candidates then MMR; returns (chunk_id, metadata, chunk_text, sim)."""
     col = get_collection()
@@ -113,8 +121,36 @@ def gather_contexts(
         lambda_mult=MMR_LAMBDA,
         select_n=min(mmr_select, len(texts)) if texts else 0,
     )
-    filtered = [p for p in pairs if p[3] >= MIN_RELEVANCE_SIM]
-    return filtered if filtered else pairs[: max(1, min(2, len(pairs)))]
+    filtered = [p for p in pairs if p[3] >= min_relevance_sim]
+    shortlist = filtered if filtered else pairs[: max(1, min(5, len(pairs)))]
+
+    if prefer_sections:
+        prefer_lower = {s.lower() for s in prefer_sections}
+
+        def _rank_key(item: tuple[str, dict, str, float]) -> tuple[int, float]:
+            _cid, meta, _txt, sim = item
+            section = str(meta.get("section") or "").lower()
+            preferred = 1 if any(ps in section for ps in prefer_lower) else 0
+            return (preferred, sim)
+
+        shortlist = sorted(shortlist, key=_rank_key, reverse=True)
+    return shortlist
+
+
+def _merge_context_lists(
+    groups: list[list[tuple[str, dict, str, float]]], limit: int
+) -> list[tuple[str, dict, str, float]]:
+    seen: set[str] = set()
+    merged: list[tuple[str, dict, str, float]] = []
+    for group in groups:
+        for item in group:
+            cid = item[0] or f"noid-{len(merged)}"
+            if cid in seen:
+                continue
+            seen.add(cid)
+            merged.append(item)
+    merged.sort(key=lambda x: x[3], reverse=True)
+    return merged[:limit]
 
 
 def _is_summary_query(query: str) -> bool:
@@ -132,19 +168,97 @@ def _is_summary_query(query: str) -> bool:
     )
 
 
+def _is_results_query(query: str) -> bool:
+    q = query.lower()
+    return any(
+        kw in q
+        for kw in (
+            "result",
+            "results",
+            "conclusion",
+            "conclusions",
+            "findings",
+            "performance",
+            "outcome",
+            "outcomes",
+        )
+    )
+
+
+def _query_expansion_terms(query: str) -> str:
+    q = query.lower()
+    terms = ["results", "findings", "experiments", "evaluation", "conclusions"]
+    if any(x in q for x in ("method", "methodology", "approach", "model")):
+        terms.extend(["methodology", "approach", "architecture", "training setup"])
+    if any(x in q for x in ("conclusion", "limitation", "future work")):
+        terms.extend(["discussion", "limitations", "future work", "conclusion"])
+    return " ".join(dict.fromkeys(terms))
+
+
 def answer_question(query: str, doc_id: str | None = None) -> RagResult:
     if not LLM_CONFIGURED:
         raise RuntimeError("Set GROQ_API_KEY in the project `.env` file.")
 
     summary_mode = _is_summary_query(query)
-    retrieval_k = SUMMARY_RETRIEVAL_K if summary_mode else RETRIEVAL_TOP_K
-    mmr_select = SUMMARY_MMR_SELECT if summary_mode else MMR_SELECT
-    retrieved = gather_contexts(query, doc_id, retrieval_k=retrieval_k, mmr_select=mmr_select)
+    results_mode = _is_results_query(query)
+    retrieval_k = SUMMARY_RETRIEVAL_K if summary_mode else max(RETRIEVAL_TOP_K, 6)
+    mmr_select = SUMMARY_MMR_SELECT if summary_mode else max(MMR_SELECT, 5)
+    min_sim = MIN_RELEVANCE_SIM
+    retrieval_query = query
+    prefer_sections: set[str] | None = None
+    if results_mode:
+        retrieval_k = max(retrieval_k, 14)
+        mmr_select = max(mmr_select, 10)
+        min_sim = min(MIN_RELEVANCE_SIM, 0.12)
+        retrieval_query = (
+            query
+            + "\nFocus on experimental results, findings, metrics, comparisons, discussion, and conclusions."
+        )
+        prefer_sections = {"results", "conclusion", "discussion", "experiment"}
+    query_variants = [retrieval_query]
+    if summary_mode:
+        query_variants.append(
+            "main idea key methods findings contributions limitations conclusion"
+        )
+    if results_mode:
+        query_variants.append(
+            "reported results findings outcomes metrics benchmark comparison conclusion"
+        )
+    query_variants.append(query + "\n" + _query_expansion_terms(query))
+    query_variants.append(query)
+
+    context_groups: list[list[tuple[str, dict, str, float]]] = []
+    for qv in query_variants:
+        context_groups.append(
+            gather_contexts(
+                qv,
+                doc_id,
+                retrieval_k=retrieval_k,
+                mmr_select=mmr_select,
+                min_relevance_sim=min_sim,
+                prefer_sections=prefer_sections,
+            )
+        )
+    retrieved = _merge_context_lists(context_groups, limit=max(mmr_select, 6))
+    if not retrieved:
+        # Last-resort fallback: very permissive pass, then pick top chunks.
+        retrieved = gather_contexts(
+            query,
+            doc_id,
+            retrieval_k=max(retrieval_k, 16),
+            mmr_select=max(mmr_select, 8),
+            min_relevance_sim=-1.0,
+            prefer_sections=prefer_sections,
+        )
+
     if not retrieved:
         return RagResult(
             answer="No indexed passages were found. Upload and index a PDF first, or broaden your question.",
             citations=[],
             logprob_summary=None,
+            retrieval_confidence=None,
+            correctness_score=None,
+            retrieved_chunks_debug=[],
         )
 
     blocks: list[str] = []
@@ -184,12 +298,19 @@ def answer_question(query: str, doc_id: str | None = None) -> RagResult:
             "Every line with factual content must include citations [n].\n"
             "Do not output generic background information that is not explicitly present in context.\n"
         )
+    elif results_mode:
+        task_instruction = (
+            "Task mode: RESULTS-FOCUSED QA.\n"
+            "Prioritize evidence from results/discussion/conclusion style content when present.\n"
+            "Answer with concrete findings from the retrieved context and cite each claim with [n].\n"
+            "If no concrete findings are present, output exactly: "
+            "\"The document does not provide enough information in the retrieved context.\"\n"
+        )
     else:
         task_instruction = (
             "Task mode: QA.\n"
             "Provide a short direct factual answer with inline [n] citations.\n"
-            "If evidence is weak/insufficient, output exactly: "
-            "\"The document does not provide enough information in the retrieved context.\"\n"
+            "If evidence is partial, answer what is supported and explicitly mention what is missing.\n"
         )
 
     user_content = (
@@ -228,5 +349,42 @@ def answer_question(query: str, doc_id: str | None = None) -> RagResult:
     answer = (choice.message.content or "").strip()
     if use_logprobs and choice.logprobs is not None:
         logprob_summary = summarize_choice_logprobs(choice)
+    sims = [float(p[3]) for p in retrieved]
+    retrieval_conf = max(0.0, min(1.0, ((sum(sims) / len(sims)) + 1.0) / 2.0)) if sims else None
+    if logprob_summary is not None:
+        correctness = max(0.0, min(100.0, logprob_summary.geometric_mean_prob * 100.0))
+    elif retrieval_conf is not None:
+        correctness = retrieval_conf * 100.0
+    else:
+        correctness = None
 
-    return RagResult(answer=answer, citations=citations, logprob_summary=logprob_summary)
+    retrieved_debug: list[dict] = []
+    for i, (cid, meta, txt, sim) in enumerate(retrieved, start=1):
+        preview = (txt or "").replace("\n", " ").strip()[:200]
+        retrieved_debug.append(
+            {
+                "rank": i,
+                "chunk_id": cid,
+                "section": str(meta.get("section") or ""),
+                "page": int(meta.get("page") or 0),
+                "similarity": float(sim),
+                "preview": preview,
+            }
+        )
+        logger.info(
+            "RAG retrieved #%s | sim=%.4f | section=%s | page=%s | preview=%s",
+            i,
+            float(sim),
+            str(meta.get("section") or ""),
+            int(meta.get("page") or 0),
+            preview,
+        )
+
+    return RagResult(
+        answer=answer,
+        citations=citations,
+        logprob_summary=logprob_summary,
+        retrieval_confidence=retrieval_conf,
+        correctness_score=correctness,
+        retrieved_chunks_debug=retrieved_debug,
+    )

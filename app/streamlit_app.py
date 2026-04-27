@@ -8,14 +8,12 @@ from __future__ import annotations
 
 import csv
 import io
+import json
 import re
 import shutil
 import uuid
 from pathlib import Path
-
 import streamlit as st
-
-# Project root on path
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -35,7 +33,10 @@ QUICK_ACTIONS: list[tuple[str, str]] = [
     ),
     ("🧠 Main Contribution", "What is the main contribution of this paper?"),
     ("⚙️ Methodology", "Explain the methodology used in this paper."),
-    ("📊 Results", "What results or conclusions does the paper present?"),
+    (
+        "📉 Limitations & Future Work",
+        "What limitations does this paper mention, and what future work directions are suggested?",
+    ),
     ("❓ Key Concepts", "List and briefly explain the key concepts in this paper."),
     (
         "🧒 Explain Like I'm 12",
@@ -190,6 +191,35 @@ def _render_logprob_summary(summary: dict, download_key: str) -> None:
         )
 
 
+def _render_correctness_panel(correctness_score: float | None, retrieval_confidence: float | None) -> None:
+    c1, c2 = st.columns(2)
+    if correctness_score is not None:
+        c1.metric("Retrieval confidence (proxy)", f"{correctness_score:.1f}/100")
+    else:
+        c1.metric("Retrieval confidence (proxy)", "—")
+    if retrieval_confidence is not None:
+        c2.metric("Avg semantic similarity", f"{retrieval_confidence * 100:.1f}%")
+    else:
+        c2.metric("Avg semantic similarity", "—")
+    st.caption(
+        "This is a proxy derived from token probability (when available) and/or retrieval similarity. "
+        "It is not a ground-truth correctness score."
+    )
+
+
+def _render_retrieval_debug(chunks: list[dict] | None) -> None:
+    if not chunks:
+        st.info("No retrieved chunk debug info.")
+        return
+    st.caption("Retrieved chunks (preview + similarity) before LLM generation.")
+    for c in chunks:
+        st.markdown(
+            f"**#{c.get('rank', '?')}** | sim={float(c.get('similarity', 0.0)):.3f} | "
+            f"page={c.get('page', '?')} | section={c.get('section', '—')}"
+        )
+        st.code(str(c.get("preview", "")))
+
+
 def ensure_data_dirs() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
@@ -204,6 +234,51 @@ def main() -> None:
         "Retrieval-Augmented Generation: embed PDF chunks, retrieve relevant passages (with MMR), "
         "then generate one answer conditioned on those passages—no agent loop, tools, or autonomous planning."
     )
+
+    eval_report_path = ROOT / "evaluation" / "eval_report.json"
+    with st.expander("Evaluation (ground-truth metrics)", expanded=False):
+        if not eval_report_path.exists():
+            st.info(
+                "No `evaluation/eval_report.json` found yet. "
+                "Run: `python evaluation/run_eval.py --gold evaluation/gold_qa_template.jsonl --k 5 --out evaluation/eval_report.json`"
+            )
+        else:
+            try:
+                report = json.loads(eval_report_path.read_text(encoding="utf-8"))
+            except Exception as e:
+                st.error(f"Could not read evaluation report: {e}")
+            else:
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Questions", int(report.get("n_questions", 0)))
+                c2.metric(
+                    "Precision@k (mean)",
+                    f"{float(report.get('retrieval_precision_at_k_mean', 0.0)):.3f}",
+                )
+                c3.metric(
+                    "Recall@k (mean)",
+                    f"{float(report.get('retrieval_recall_at_k_mean', 0.0)):.3f}",
+                )
+
+                c4, c5, c6 = st.columns(3)
+                c4.metric(
+                    "Citation hit rate (mean)",
+                    f"{float(report.get('answer_citation_hit_rate_mean', 0.0) or 0.0):.3f}",
+                )
+                c5.metric(
+                    "Refusal correctness",
+                    (
+                        f"{float(report.get('refusal_correctness_mean', 0.0) or 0.0):.3f}"
+                        if report.get("refusal_correctness_mean") is not None
+                        else "—"
+                    ),
+                )
+                c6.metric(
+                    "Citation count (mean)",
+                    f"{float(report.get('answer_citation_count_mean', 0.0)):.2f}",
+                )
+                st.caption(
+                    "These are true benchmark metrics computed against a gold QA set, unlike live proxy confidence."
+                )
 
     with st.sidebar:
         st.subheader("Index a paper")
@@ -278,6 +353,14 @@ def main() -> None:
             st.markdown(content)
             if msg["role"] == "assistant" and msg.get("citations"):
                 _render_sources_section(msg["citations"])
+            if msg["role"] == "assistant":
+                with st.expander("Confidence", expanded=False):
+                    _render_correctness_panel(
+                        msg.get("correctness_score"),
+                        msg.get("retrieval_confidence"),
+                    )
+                with st.expander("Retrieval debug (chunks + scores)", expanded=False):
+                    _render_retrieval_debug(msg.get("retrieved_chunks_debug"))
             if msg["role"] == "assistant" and msg.get("logprob_summary"):
                 with st.expander("Evaluation: output-token log-probabilities"):
                     _render_logprob_summary(msg["logprob_summary"], download_key=f"logprob_hist_{i}")
@@ -318,6 +401,13 @@ def main() -> None:
         else:
             formatted_answer = _format_answer_for_display(result.answer)
         st.markdown(formatted_answer)
+        with st.expander("Confidence", expanded=False):
+            _render_correctness_panel(
+                result.correctness_score,
+                result.retrieval_confidence,
+            )
+        with st.expander("Retrieval debug (chunks + scores)", expanded=False):
+            _render_retrieval_debug(result.retrieved_chunks_debug)
         if result.citations:
             _render_sources_section(result.citations)
         logprob_dict = None
@@ -330,6 +420,9 @@ def main() -> None:
             "role": "assistant",
             "content": formatted_answer,
             "citations": [c.to_dict() for c in result.citations],
+            "correctness_score": result.correctness_score,
+            "retrieval_confidence": result.retrieval_confidence,
+            "retrieved_chunks_debug": result.retrieved_chunks_debug,
         }
         if logprob_dict is not None:
             payload["logprob_summary"] = logprob_dict

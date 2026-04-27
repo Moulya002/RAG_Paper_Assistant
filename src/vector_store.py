@@ -53,7 +53,7 @@ def query_raw(
     q_emb = embed_texts([query_text])[0].tolist()
     kwargs: dict[str, Any] = {
         "query_embeddings": [q_emb],
-        "n_results": k,
+        "n_results": max(5, k),
         "include": ["documents", "metadatas", "distances"],
     }
     if doc_id:
